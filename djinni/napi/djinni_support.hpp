@@ -31,6 +31,7 @@
 #include <string>
 #include <thread>
 #include <typeindex>
+#include <vector>
 
 #define DJINNI_NAPI_CALL(env, call) ::djinni::napiCall((env), (call), #call, __FILE__, __LINE__)
 #define DJINNI_NAPI_ASSERT(env, check, message) \
@@ -45,6 +46,8 @@ namespace djinni {
 DJINNI_NORETURN_DEFINITION void throwError(napi_env env, const char * message);
 void napiCall(napi_env env, napi_status status, const char * call, const char * file, int line);
 void setPendingFromCurrent(napi_env env) noexcept;
+void napiInit(napi_env env);
+void napiShutdown();
 
 napi_value undefined(napi_env env);
 bool isNullOrUndefined(napi_env env, napi_value value);
@@ -82,6 +85,32 @@ auto runOnJsThreadSync(napi_env env, F && fn) -> decltype(fn(env)) {
         return std::move(*result);
     }
 }
+
+class NapiArgs final {
+public:
+    NapiArgs(napi_env env, napi_callback_info info, size_t expected);
+
+    napi_value operator[](size_t index) const;
+    napi_value thisArg() const { return thisArg_; }
+    size_t size() const { return args_.size(); }
+
+private:
+    napi_env env_;
+    std::vector<napi_value> args_;
+    napi_value thisArg_ = nullptr;
+};
+
+class NapiHandleScope final {
+public:
+    explicit NapiHandleScope(napi_env env);
+    NapiHandleScope(const NapiHandleScope &) = delete;
+    NapiHandleScope & operator=(const NapiHandleScope &) = delete;
+    ~NapiHandleScope();
+
+private:
+    napi_env env_;
+    napi_handle_scope scope_ = nullptr;
+};
 
 class GlobalRef {
 public:

@@ -18,9 +18,9 @@
 
 #include "djinni_support.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <set>
 #include <string>
@@ -30,33 +30,74 @@
 
 namespace djinni {
 
-template <class CppT>
-struct Number {
-    using CppType = CppT;
+struct Bool {
+    using CppType = bool;
     using NapiType = napi_value;
+    using Boxed = Bool;
 
     static CppType toCpp(napi_env env, NapiType value) {
-        double number = 0;
-        DJINNI_NAPI_CALL(env, napi_get_value_double(env, value, &number));
-        return static_cast<CppType>(number);
+        bool result = false;
+        DJINNI_NAPI_CALL(env, napi_get_value_bool(env, value, &result));
+        return result;
     }
 
     static NapiType fromCpp(napi_env env, CppType value) {
         napi_value result;
-        DJINNI_NAPI_CALL(env, napi_create_double(env, static_cast<double>(value), &result));
+        DJINNI_NAPI_CALL(env, napi_get_boolean(env, value, &result));
         return result;
     }
 };
 
-using I8 = Number<int8_t>;
-using I16 = Number<int16_t>;
-using I32 = Number<int32_t>;
-using F32 = Number<float>;
-using F64 = Number<double>;
+struct I32 {
+    using CppType = int32_t;
+    using NapiType = napi_value;
+    using Boxed = I32;
+
+    static CppType toCpp(napi_env env, NapiType value) {
+        int32_t result = 0;
+        DJINNI_NAPI_CALL(env, napi_get_value_int32(env, value, &result));
+        return result;
+    }
+
+    static NapiType fromCpp(napi_env env, CppType value) {
+        napi_value result;
+        DJINNI_NAPI_CALL(env, napi_create_int32(env, value, &result));
+        return result;
+    }
+};
+
+struct I8 {
+    using CppType = int8_t;
+    using NapiType = napi_value;
+    using Boxed = I8;
+
+    static CppType toCpp(napi_env env, NapiType value) {
+        return static_cast<CppType>(I32::toCpp(env, value));
+    }
+
+    static NapiType fromCpp(napi_env env, CppType value) {
+        return I32::fromCpp(env, value);
+    }
+};
+
+struct I16 {
+    using CppType = int16_t;
+    using NapiType = napi_value;
+    using Boxed = I16;
+
+    static CppType toCpp(napi_env env, NapiType value) {
+        return static_cast<CppType>(I32::toCpp(env, value));
+    }
+
+    static NapiType fromCpp(napi_env env, CppType value) {
+        return I32::fromCpp(env, value);
+    }
+};
 
 struct I64 {
     using CppType = int64_t;
     using NapiType = napi_value;
+    using Boxed = I64;
 
     static CppType toCpp(napi_env env, NapiType value) {
         int64_t result = 0;
@@ -73,33 +114,49 @@ struct I64 {
     }
 };
 
-struct Bool {
-    using CppType = bool;
+struct F64 {
+    using CppType = double;
     using NapiType = napi_value;
+    using Boxed = F64;
 
     static CppType toCpp(napi_env env, NapiType value) {
-        bool result = false;
-        DJINNI_NAPI_CALL(env, napi_get_value_bool(env, value, &result));
+        double result = 0;
+        DJINNI_NAPI_CALL(env, napi_get_value_double(env, value, &result));
         return result;
     }
 
     static NapiType fromCpp(napi_env env, CppType value) {
         napi_value result;
-        DJINNI_NAPI_CALL(env, napi_get_boolean(env, value, &result));
+        DJINNI_NAPI_CALL(env, napi_create_double(env, value, &result));
         return result;
+    }
+};
+
+struct F32 {
+    using CppType = float;
+    using NapiType = napi_value;
+    using Boxed = F32;
+
+    static CppType toCpp(napi_env env, NapiType value) {
+        return static_cast<CppType>(F64::toCpp(env, value));
+    }
+
+    static NapiType fromCpp(napi_env env, CppType value) {
+        return F64::fromCpp(env, value);
     }
 };
 
 struct String {
     using CppType = std::string;
     using NapiType = napi_value;
+    using Boxed = String;
 
     static CppType toCpp(napi_env env, NapiType value) {
         size_t length = 0;
         DJINNI_NAPI_CALL(env, napi_get_value_string_utf8(env, value, nullptr, 0, &length));
-        std::string result(length, '\0');
-        DJINNI_NAPI_CALL(env, napi_get_value_string_utf8(env, value, result.data(), result.size() + 1, &length));
-        return result;
+        std::vector<char> buffer(length + 1, '\0');
+        DJINNI_NAPI_CALL(env, napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &length));
+        return std::string(buffer.data(), length);
     }
 
     static NapiType fromCpp(napi_env env, const CppType & value) {
@@ -112,6 +169,7 @@ struct String {
 struct WString {
     using CppType = std::wstring;
     using NapiType = napi_value;
+    using Boxed = WString;
 
     static CppType toCpp(napi_env env, NapiType value) {
         auto text = String::toCpp(env, value);
@@ -125,27 +183,36 @@ struct WString {
 
 template <template <class...> class OptionalT, class T>
 struct Optional {
-    using CppType = OptionalT<typename T::CppType>;
+    template <typename C> static OptionalT<typename C::CppType> opt_type(...);
+    template <typename C> static typename C::CppOptType opt_type(typename C::CppOptType *);
+    using CppType = decltype(opt_type<T>(nullptr));
     using NapiType = napi_value;
+    using Boxed = Optional;
 
     static CppType toCpp(napi_env env, NapiType value) {
         if (isNullOrUndefined(env, value)) {
             return CppType{};
         }
-        return CppType{T::toCpp(env, value)};
+        return T::Boxed::toCpp(env, value);
     }
 
-    static NapiType fromCpp(napi_env env, const CppType & value) {
+    static NapiType fromCpp(napi_env env, const OptionalT<typename T::CppType> & value) {
         if (!value) {
             return undefined(env);
         }
-        return T::fromCpp(env, *value);
+        return T::Boxed::fromCpp(env, *value);
+    }
+
+    template <typename C = T>
+    static NapiType fromCpp(napi_env env, const typename C::CppOptType & value) {
+        return T::Boxed::fromCppOpt(env, value);
     }
 };
 
 struct Binary {
     using CppType = std::vector<uint8_t>;
     using NapiType = napi_value;
+    using Boxed = Binary;
 
     static CppType toCpp(napi_env env, NapiType value) {
         void * data = nullptr;
@@ -173,7 +240,9 @@ struct Binary {
         void * data = nullptr;
         napi_value result;
         DJINNI_NAPI_CALL(env, napi_create_arraybuffer(env, value.size(), &data, &result));
-        std::copy(value.begin(), value.end(), static_cast<uint8_t *>(data));
+        if (data != nullptr && !value.empty()) {
+            std::memcpy(data, value.data(), value.size());
+        }
         return result;
     }
 };
@@ -181,23 +250,18 @@ struct Binary {
 struct Date {
     using CppType = std::chrono::system_clock::time_point;
     using NapiType = napi_value;
+    using Boxed = Date;
 
     static CppType toCpp(napi_env env, NapiType value) {
-        napi_value getTime = getProperty(env, value, "getTime");
-        napi_value millisValue;
-        DJINNI_NAPI_CALL(env, napi_call_function(env, value, getTime, 0, nullptr, &millisValue));
-        double millis = Number<double>::toCpp(env, millisValue);
+        double millis = 0;
+        DJINNI_NAPI_CALL(env, napi_get_date_value(env, value, &millis));
         return CppType(std::chrono::milliseconds(static_cast<int64_t>(millis)));
     }
 
     static NapiType fromCpp(napi_env env, const CppType & value) {
         auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(value.time_since_epoch()).count();
-        napi_value millisValue = Number<double>::fromCpp(env, static_cast<double>(millis));
-        napi_value global;
-        DJINNI_NAPI_CALL(env, napi_get_global(env, &global));
-        napi_value dateConstructor = getProperty(env, global, "Date");
         napi_value result;
-        DJINNI_NAPI_CALL(env, napi_new_instance(env, dateConstructor, 1, &millisValue, &result));
+        DJINNI_NAPI_CALL(env, napi_create_date(env, static_cast<double>(millis), &result));
         return result;
     }
 };
@@ -206,6 +270,7 @@ template <class T>
 struct List {
     using CppType = std::vector<typename T::CppType>;
     using NapiType = napi_value;
+    using Boxed = List;
 
     static CppType toCpp(napi_env env, NapiType value) {
         uint32_t length = 0;
@@ -213,9 +278,10 @@ struct List {
         CppType result;
         result.reserve(length);
         for (uint32_t i = 0; i < length; ++i) {
+            NapiHandleScope scope(env);
             napi_value element;
             DJINNI_NAPI_CALL(env, napi_get_element(env, value, i, &element));
-            result.push_back(T::toCpp(env, element));
+            result.push_back(T::Boxed::toCpp(env, element));
         }
         return result;
     }
@@ -225,7 +291,8 @@ struct List {
         DJINNI_NAPI_CALL(env, napi_create_array_with_length(env, value.size(), &result));
         uint32_t index = 0;
         for (const auto & element : value) {
-            DJINNI_NAPI_CALL(env, napi_set_element(env, result, index++, T::fromCpp(env, element)));
+            NapiHandleScope scope(env);
+            DJINNI_NAPI_CALL(env, napi_set_element(env, result, index++, T::Boxed::fromCpp(env, element)));
         }
         return result;
     }
@@ -235,6 +302,7 @@ template <class T>
 struct Set {
     using CppType = std::unordered_set<typename T::CppType>;
     using NapiType = napi_value;
+    using Boxed = Set;
 
     static CppType toCpp(napi_env env, NapiType value) {
         napi_value global;
@@ -263,6 +331,7 @@ template <class K, class V>
 struct Map {
     using CppType = std::unordered_map<typename K::CppType, typename V::CppType>;
     using NapiType = napi_value;
+    using Boxed = Map;
 
     static CppType toCpp(napi_env env, NapiType value) {
         napi_value global;
@@ -276,13 +345,14 @@ struct Map {
         DJINNI_NAPI_CALL(env, napi_get_array_length(env, entries, &length));
         CppType result;
         for (uint32_t i = 0; i < length; ++i) {
+            NapiHandleScope scope(env);
             napi_value entry;
             napi_value key;
             napi_value element;
             DJINNI_NAPI_CALL(env, napi_get_element(env, entries, i, &entry));
             DJINNI_NAPI_CALL(env, napi_get_element(env, entry, 0, &key));
             DJINNI_NAPI_CALL(env, napi_get_element(env, entry, 1, &element));
-            result.emplace(K::toCpp(env, key), V::toCpp(env, element));
+            result.emplace(K::Boxed::toCpp(env, key), V::Boxed::toCpp(env, element));
         }
         return result;
     }
@@ -292,10 +362,11 @@ struct Map {
         DJINNI_NAPI_CALL(env, napi_create_array_with_length(env, value.size(), &entries));
         uint32_t index = 0;
         for (const auto & pair : value) {
+            NapiHandleScope scope(env);
             napi_value entry;
             DJINNI_NAPI_CALL(env, napi_create_array_with_length(env, 2, &entry));
-            DJINNI_NAPI_CALL(env, napi_set_element(env, entry, 0, K::fromCpp(env, pair.first)));
-            DJINNI_NAPI_CALL(env, napi_set_element(env, entry, 1, V::fromCpp(env, pair.second)));
+            DJINNI_NAPI_CALL(env, napi_set_element(env, entry, 0, K::Boxed::fromCpp(env, pair.first)));
+            DJINNI_NAPI_CALL(env, napi_set_element(env, entry, 1, V::Boxed::fromCpp(env, pair.second)));
             DJINNI_NAPI_CALL(env, napi_set_element(env, entries, index++, entry));
         }
 

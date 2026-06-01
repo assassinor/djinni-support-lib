@@ -17,6 +17,7 @@
 #include "djinni_support.hpp"
 #include "djinni/proxy_cache_impl.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <thread>
 #include <unordered_map>
@@ -24,6 +25,10 @@
 namespace djinni {
 
 namespace {
+
+constexpr const char * kObjectIdProperty = "__djinni_napi_object_id";
+
+void cleanupHook(void *);
 
 struct JsThreadJob {
     std::function<void(napi_env)> task;
@@ -46,9 +51,18 @@ public:
         return tsfn_ != nullptr && std::this_thread::get_id() == jsThreadId_;
     }
 
+    bool accepts(napi_env env) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return env_ == env && tsfn_ != nullptr;
+    }
+
     void ensure(napi_env env) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (tsfn_ != nullptr) {
+            if (!cleanupHookRegistered_) {
+                DJINNI_NAPI_CALL(env, napi_add_env_cleanup_hook(env, cleanupHook, nullptr));
+                cleanupHookRegistered_ = true;
+            }
             return;
         }
 
@@ -93,6 +107,31 @@ public:
             },
             &tsfn_
         ));
+        DJINNI_NAPI_CALL(env, napi_add_env_cleanup_hook(env, cleanupHook, nullptr));
+        cleanupHookRegistered_ = true;
+    }
+
+    void shutdown(bool removeCleanupHook) noexcept {
+        napi_env env = nullptr;
+        napi_threadsafe_function tsfn = nullptr;
+        bool cleanupHookRegistered = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            env = env_;
+            tsfn = tsfn_;
+            cleanupHookRegistered = cleanupHookRegistered_;
+            env_ = nullptr;
+            tsfn_ = nullptr;
+            cleanupHookRegistered_ = false;
+            jsThreadId_ = std::thread::id();
+        }
+
+        if (env != nullptr && cleanupHookRegistered && removeCleanupHook) {
+            napi_remove_env_cleanup_hook(env, cleanupHook, nullptr);
+        }
+        if (tsfn != nullptr) {
+            napi_release_threadsafe_function(tsfn, napi_tsfn_abort);
+        }
     }
 
     void runAsync(napi_env env, const std::function<void(napi_env)> & task) {
@@ -139,6 +178,7 @@ private:
     napi_env env_ = nullptr;
     std::thread::id jsThreadId_;
     napi_threadsafe_function tsfn_ = nullptr;
+    bool cleanupHookRegistered_ = false;
 };
 
 JsThreadDispatcher & jsThreadDispatcher() {
@@ -176,6 +216,12 @@ uint64_t & nextCppProxyHandleId() {
     return next;
 }
 
+uint64_t nextObjectId() {
+    static std::atomic<uint64_t> next { 1 };
+    auto value = next.fetch_add(1, std::memory_order_relaxed);
+    return value == 0 ? next.fetch_add(1, std::memory_order_relaxed) : value;
+}
+
 thread_local napi_env currentCppProxyEnvValue = nullptr;
 thread_local const char * currentCppProxyNameValue = nullptr;
 
@@ -185,6 +231,9 @@ void deleteReferenceOnJsThread(napi_env env, napi_ref ref) noexcept {
     }
 
     auto & dispatcher = jsThreadDispatcher();
+    if (!dispatcher.accepts(env)) {
+        return;
+    }
     if (dispatcher.ready() && !dispatcher.isJsThread()) {
         dispatcher.runAsyncNoexcept(env, [ref](napi_env callbackEnv) {
             napi_delete_reference(callbackEnv, ref);
@@ -193,6 +242,33 @@ void deleteReferenceOnJsThread(napi_env env, napi_ref ref) noexcept {
     }
 
     napi_delete_reference(env, ref);
+}
+
+void clearCppProxyFactories() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(cppProxyFactoryMutex());
+        cppProxyFactories().clear();
+    } catch (...) {
+    }
+}
+
+void clearCppProxyHandleRegistry() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(cppProxyHandleRegistryMutex());
+        cppProxyHandleRegistry().clear();
+        cppProxyHandleReverseRegistry().clear();
+    } catch (...) {
+    }
+}
+
+void napiShutdownImpl(bool removeCleanupHook) noexcept {
+    clearCppProxyFactories();
+    clearCppProxyHandleRegistry();
+    jsThreadDispatcher().shutdown(removeCleanupHook);
+}
+
+void cleanupHook(void *) {
+    napiShutdownImpl(false);
 }
 
 } // namespace
@@ -225,6 +301,14 @@ void setPendingFromCurrent(napi_env env) noexcept {
     }
 }
 
+void napiInit(napi_env env) {
+    ensureJsThreadDispatcher(env);
+}
+
+void napiShutdown() {
+    napiShutdownImpl(true);
+}
+
 napi_value undefined(napi_env env) {
     napi_value value;
     DJINNI_NAPI_CALL(env, napi_get_undefined(env, &value));
@@ -238,6 +322,29 @@ bool isNullOrUndefined(napi_env env, napi_value value) {
     napi_valuetype type;
     DJINNI_NAPI_CALL(env, napi_typeof(env, value, &type));
     return type == napi_null || type == napi_undefined;
+}
+
+NapiArgs::NapiArgs(napi_env env, napi_callback_info info, size_t expected) : env_(env) {
+    args_.resize(expected);
+    size_t argc = expected;
+    DJINNI_NAPI_CALL(env_, napi_get_cb_info(env_, info, &argc, args_.data(), &thisArg_, nullptr));
+    DJINNI_NAPI_ASSERT(env_, argc >= expected, "not enough arguments")
+    args_.resize(argc);
+}
+
+napi_value NapiArgs::operator[](size_t index) const {
+    DJINNI_NAPI_ASSERT(env_, index < args_.size(), "argument index out of range")
+    return args_[index];
+}
+
+NapiHandleScope::NapiHandleScope(napi_env env) : env_(env) {
+    DJINNI_NAPI_CALL(env_, napi_open_handle_scope(env_, &scope_));
+}
+
+NapiHandleScope::~NapiHandleScope() {
+    if (env_ != nullptr && scope_ != nullptr) {
+        napi_close_handle_scope(env_, scope_);
+    }
 }
 
 bool isNativeRef(napi_env env, napi_value value) {
@@ -287,11 +394,33 @@ bool hasMethod(napi_env env, napi_value object, const char * name) {
 }
 
 uint64_t objectIdFromEts(napi_env env, napi_value object) {
-    napi_value result = callMethod(env, object, "_djinni_getObjectId", 0, nullptr);
-    double number = 0;
-    DJINNI_NAPI_CALL(env, napi_get_value_double(env, result, &number));
-    DJINNI_NAPI_ASSERT(env, number > 0, "ETS object id is invalid")
-    return static_cast<uint64_t>(number);
+    DJINNI_NAPI_ASSERT(env, !isNullOrUndefined(env, object), "ETS object is null")
+
+    napi_value existing = nullptr;
+    napi_status getStatus = napi_get_named_property(env, object, kObjectIdProperty, &existing);
+    if (getStatus == napi_ok && !isNullOrUndefined(env, existing)) {
+        uint64_t objectId = 0;
+        bool lossless = false;
+        if (napi_get_value_bigint_uint64(env, existing, &objectId, &lossless) == napi_ok && lossless && objectId > 0) {
+            return objectId;
+        }
+    }
+
+    auto objectId = nextObjectId();
+    napi_value property;
+    DJINNI_NAPI_CALL(env, napi_create_bigint_uint64(env, objectId, &property));
+    napi_property_descriptor descriptor {
+        kObjectIdProperty,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        property,
+        napi_default,
+        nullptr,
+    };
+    DJINNI_NAPI_CALL(env, napi_define_properties(env, object, 1, &descriptor));
+    return objectId;
 }
 
 void registerCppProxyFactory(napi_env env, const char * name, napi_value factory) {
