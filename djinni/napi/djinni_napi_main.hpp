@@ -1,6 +1,5 @@
 //
 // Copyright 2014 Dropbox, Inc.
-// Copyright 2021 cross-language-cpp
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,19 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// This provides a minimal JNI_OnLoad and JNI_OnUnload implementation.
-// Don't include it if your library does require a custom JNI_OnLoad implementation with custom initialization logic.
+
 #pragma once
+
+#include <node_api.h>
 
 #include "djinni_support.hpp"
 
-// Called when library is loaded by the first class which uses it.
-CJNIEXPORT jint JNICALL JNI_OnLoad(JavaVM * jvm, void * /*reserved*/) {
-    djinni::jniInit(jvm);
-    return JNI_VERSION_1_6;
-}
+namespace djinni {
 
-// (Potentially) called when library is about to be unloaded.
-CJNIEXPORT void JNICALL JNI_OnUnload(JavaVM * /*jvm*/, void * /*reserved*/) {
-    djinni::jniShutdown();
+void registerNapiModule(const char * moduleName, napi_addon_register_func registerFunc);
+
 }
